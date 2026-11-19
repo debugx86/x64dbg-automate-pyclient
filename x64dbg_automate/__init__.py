@@ -262,7 +262,27 @@ class X64DbgClient(XAutoHighLevelCommandAbstractionMixin, DebugEventQueueMixin):
                 pass
             raise
 
-    def start_session(self, target_exe: str = "", cmdline: str = "", current_dir: str = "") -> int:
+    def reset_breakpoints(self) -> dict:
+        """
+        Clears every breakpoint type restored from the module debug database.
+
+        x64dbg keeps a per-module database (``<x64dbg>/db/<module>.dd64``) holding
+        breakpoints, labels, comments and patches across sessions, and re-applies
+        it on *every* load. terminate_session() does not write the database back,
+        so clearing breakpoints in one session has no effect on the next one: a
+        stale TLS/entry breakpoint returns and silently eats the first ``go``.
+
+        Returns:
+            Per-type success flags for the three breakpoint families
+        """
+        return {
+            "software": self.cmd_sync("bpc"),
+            "hardware": self.cmd_sync("bphwc"),
+            "memory": self.cmd_sync("bpmc"),
+        }
+
+    def start_session(self, target_exe: str = "", cmdline: str = "", current_dir: str = "",
+                      clean_breakpoints: bool = False) -> int:
         """
         Start a new x64dbg session and optionally load an executable into it. If target_exe is not provided,
         the debugger starts without any executable. This is useful for performing configuration before the debuggee is loaded.
@@ -271,6 +291,10 @@ class X64DbgClient(XAutoHighLevelCommandAbstractionMixin, DebugEventQueueMixin):
             target_exe: The path to the target executable (optional)
             cmdline: The command line arguments to pass to the executable (optional)
             current_dir: The current working directory to set for the executable (optional)
+            clean_breakpoints: Clear the breakpoints restored from the .dd64 database
+                once the debuggee stops at the system breakpoint. x64dbg re-applies
+                that database on every load, so without this a breakpoint left over
+                from a previous session stops the first ``go``.
 
         Returns:
             The debug session ID
@@ -287,13 +311,18 @@ class X64DbgClient(XAutoHighLevelCommandAbstractionMixin, DebugEventQueueMixin):
                 self.terminate_session()
                 raise RuntimeError("Failed to load executable")
             self.wait_cmd_ready()
+            if clean_breakpoints:
+                # InitDebug loads the database, so this must run after the debuggee
+                # exists - clearing before the launch would be undone by the load.
+                self.reset_breakpoints()
             # Remembered so restart_session() can relaunch the same target without
             # the caller having to keep the path around (A11).
             self._last_target = (target_exe.strip(), cmdline, current_dir)
         return self.session_pid
 
     def restart_session(self, target_exe: str | None = None, cmdline: str | None = None,
-                        current_dir: str | None = None, timeout: int = 25) -> bool:
+                        current_dir: str | None = None, timeout: int = 25,
+                        clean_breakpoints: bool = False) -> bool:
         """
         Restarts the debuggee *inside* the current debugger session.
 
@@ -311,6 +340,9 @@ class X64DbgClient(XAutoHighLevelCommandAbstractionMixin, DebugEventQueueMixin):
             cmdline: Command line arguments (defaults to the previous value)
             current_dir: Working directory (defaults to the previous value)
             timeout: Seconds to wait for the ``init`` sentinel and for the debuggee
+            clean_breakpoints: Clear the breakpoints ``init`` restored from the .dd64
+                database (same trap as start_session: the database is re-applied on
+                every load, including a restart)
 
         Returns:
             True if a debuggee is present again after the restart
@@ -343,7 +375,11 @@ class X64DbgClient(XAutoHighLevelCommandAbstractionMixin, DebugEventQueueMixin):
         if not executed:
             return False
         self._last_target = (target_exe, cmdline or "", current_dir or "")
-        return self.wait_until_debugging(timeout)
+        ready = self.wait_until_debugging(timeout)
+        if ready and clean_breakpoints:
+            # `init` re-loads the .dd64 database just like a fresh launch does.
+            self.reset_breakpoints()
+        return ready
 
     def start_session_attach(self, pid: int) -> int:
         """

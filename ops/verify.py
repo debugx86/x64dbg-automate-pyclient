@@ -90,6 +90,19 @@ async def a2():
                     f"drops the breakpoint that hit while it was in flight (measured "
                     f"on freedom.exe 2026-11-14). got {default!r}")
 
+print("=== 3b. B1: 启动时清掉 .dd64 恢复的断点 ===")
+async def b1():
+    async with cc(S.mcp._mcp_server) as c:
+        tools = {t.name: t for t in (await c.list_tools()).tools}
+        assert "reset_breakpoints" in tools, "reset_breakpoints 工具没注册"
+        for name in ("start_session", "restart_session"):
+            props = tools[name].inputSchema.get("properties", {})
+            default = props.get("clean_breakpoints", {}).get("default")
+            print(f"  {name}: clean_breakpoints default = {default}")
+            assert default is True, (
+                f"{name}.clean_breakpoints 必须默认 True：x64dbg 每次加载都会重放 "
+                f".dd64（实测 bpc 清空后退出不落盘，下次启动断点全回来）。got {default!r}")
+
 print("=== 4. local_patch_info ===")
 print("  " + LE.local_patch_info().replace("\n", "\n  "))
 
@@ -136,6 +149,7 @@ print("  0x140000000+0x10 ->", hex(S._parse_address_or_expression("0x140000000+0
 asyncio.run(tools())
 asyncio.run(a1())
 asyncio.run(a2())
+asyncio.run(b1())
 
 print("=== 7. pause 不再假成功：无 debuggee 时必须 False ===")
 from x64dbg_automate import X64DbgClient

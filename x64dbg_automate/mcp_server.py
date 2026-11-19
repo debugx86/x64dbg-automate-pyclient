@@ -34,7 +34,7 @@ from x64dbg_automate.models import (
 # the local revision lives in pyproject [project].version and must equal this
 # constant — ops/verify.py enforces it). Bump the trailing counter on every
 # further local edit so changes stay diffable against upstream.
-_XAUTO_MCP_PATCH = "0.9.2+local.14"
+_XAUTO_MCP_PATCH = "0.9.2+local.15"
 
 mcp = FastMCP(
     "x64dbg-automate",
@@ -417,7 +417,8 @@ def list_sessions() -> str:
 
 
 @mcp.tool()
-def start_session(x64dbg_path: str = "", target_exe: str = "", cmdline: str = "", current_dir: str = "") -> str:
+def start_session(x64dbg_path: str = "", target_exe: str = "", cmdline: str = "", current_dir: str = "",
+                  clean_breakpoints: bool = True) -> str:
     """Launch a new x64dbg instance and optionally load an executable.
 
     If x96dbg.exe (the launcher) is given, the correct x64dbg.exe or x32dbg.exe is
@@ -428,37 +429,65 @@ def start_session(x64dbg_path: str = "", target_exe: str = "", cmdline: str = ""
         target_exe: Path to executable to debug (optional)
         cmdline: Command-line arguments for the target (optional)
         current_dir: Working directory for the target (optional)
+        clean_breakpoints: Clear breakpoints restored from the module's .dd64 database
+            (default True). x64dbg re-applies that database on every load, so a stale
+            TLS/entry breakpoint from an earlier session otherwise stops the first go.
+            Pass False only when you deliberately want the saved set back.
     """
     global _client
     try:
         path = _resolve_x64dbg_path_with_env(x64dbg_path)
         resolved = _resolve_debugger_path(path, target_exe)
         _client = X64DbgClient(resolved)
-        pid = _client.start_session(target_exe, cmdline, current_dir)
-        return f"Session started with {Path(resolved).name}. Debugger PID: {pid}"
+        pid = _client.start_session(target_exe, cmdline, current_dir,
+                                    clean_breakpoints=bool(clean_breakpoints))
+        note = "; restored breakpoints cleared" if clean_breakpoints else ""
+        return f"Session started with {Path(resolved).name}. Debugger PID: {pid}{note}"
     except Exception as e:
         _client = None
         return f"Error: {e}"
 
 
 @mcp.tool()
-def restart_session(target_exe: str = "", timeout: int = 25) -> str:
+def reset_breakpoints() -> str:
+    """Clear all breakpoints (software/hardware/memory) left over from the .dd64 database.
+
+    Call it after connecting to an existing session that already has stale
+    breakpoints. start_session/restart_session do this automatically by default.
+    """
+    try:
+        client = _require_client()
+        result = client.reset_breakpoints()
+        failed = [k for k, ok in result.items() if ok is not True]
+        if failed:
+            return f"Cleared with errors: {', '.join(failed)} (see get_log)"
+        return "All breakpoints cleared (software, hardware, memory)."
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def restart_session(target_exe: str = "", timeout: int = 25, clean_breakpoints: bool = True) -> str:
     """Restart the debuggee inside the current debugger session.
 
-    Keeps the debugger process alive, so breakpoints, the .dd64 database and any
-    analysis already done survive the restart. x64dbg has no `rerun` command; this
-    queues stop + init on the command thread (DbgCmdExec) instead.
+    Keeps the debugger process alive, so labels, comments, analysis and the plugin
+    connection survive the restart. x64dbg has no `rerun` command; this queues
+    stop + init on the command thread (DbgCmdExec) instead.
 
     Args:
         target_exe: Executable to load (default: the one passed to start_session)
         timeout: Seconds to wait for the restart
+        clean_breakpoints: Clear breakpoints re-applied by `init` from the .dd64
+            database (default True)
     """
     try:
         client = _require_client()
-        if not client.restart_session(target_exe.strip() or None, timeout=max(5, int(timeout))):
+        if not client.restart_session(target_exe.strip() or None, timeout=max(5, int(timeout)),
+                                     clean_breakpoints=bool(clean_breakpoints)):
             return "Error: restart did not bring a debuggee back (check get_log)"
         pid = client.debugee_pid()
-        return f"Debuggee restarted. Debuggee PID: {pid}"
+        note = "; restored breakpoints cleared" if clean_breakpoints else ""
+        return f"Debuggee restarted. Debuggee PID: {pid}{note}"
     except Exception as e:
         return f"Error: {e}"
 
