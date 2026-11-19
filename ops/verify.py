@@ -25,7 +25,7 @@ from mcp.shared.memory import create_connected_server_and_client_session as cc
 print("=== 0. 安装健康检查（防 D13：装一半 / namespace 遮蔽）===")
 import importlib.metadata as md
 import pathlib
-import tomllib
+import re
 
 import x64dbg_automate as _pkg
 
@@ -34,7 +34,12 @@ assert _pkg.__file__ is not None, (
     "namespace package（D13），本地扩展根本没加载。清理后重装。")
 _here = pathlib.Path(_pkg.__file__).resolve().parent
 _dist = md.version("x64dbg_automate")
-_proj = tomllib.loads((_here.parent / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+# tomllib is 3.11+, but this script also has to run on the py3.10 CI leg, so read
+# the single value we need straight out of the file instead of adding a dep.
+_pyproject_txt = (_here.parent / "pyproject.toml").read_text(encoding="utf-8")
+_m = re.search(r'^version\s*=\s*"([^"]+)"', _pyproject_txt, re.MULTILINE)
+assert _m is not None, "pyproject.toml has no [project] version"
+_proj = _m.group(1)
 print(f"  path      : {_here}")
 print(f"  dist      : {_dist}")
 print(f"  pyproject : {_proj}")
