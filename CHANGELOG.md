@@ -39,6 +39,16 @@ pause() 反反调试兜底的三处缺陷修复 + `script_run(expect=)` 的两�
   running 态发起立即 False；**停在内核等待点发起会等满 wait_timeout 才 False，
   并把会话状态推成 running**（原先挂在"仍未验证"清单上，现在闭环）。
 
+### ci（同版跟进提交，不改运行时代码）
+
+- **macOS 腿从每次 push 的矩阵里挪走**。local.19 与 local.20 两次 push 的
+  `test / macos-latest / py3.13` 都在排队整整 15 分钟后被 `cancelled` —— `runner_name` 为空、
+  `steps` 为空，即**从未拿到 runner**；而 local.18 同一条腿排队约 10 分钟后拿到 runner、36 s 全绿。
+  结论：私有仓库免费套餐下 hosted macOS 是稀缺资源，放在 per-push 矩阵里只会随机把闸门染红。
+  现在 push/PR 闸门 = ubuntu×3 + windows×3；macOS 变成独立作业 `macos`，只在
+  **定时（每周一 03:30 UTC）或 `gh workflow run ci.yml --ref <分支>` 手动**时跑，
+  `timeout-minutes: 25` 且 `continue-on-error: true`（诊断用，不阻塞 `ci` 闸门；`ci.needs` 仍只依赖 `test`）。
+
 ## 0.9.2+local.19 — 2026-11-20
 
 - feat(pause): 三级兜底 —— 检测 `PEB.BeingDebugged==0` 时跳过两次注定失败的 pause；
