@@ -29,7 +29,7 @@ import sys
 MEM_IMAGE = 0x1000000
 _MAX_SCAN = 64 * 1024 * 1024
 
-PATCH = "0.9.2+local.16"
+PATCH = "0.9.2+local.17"
 LOCAL_TOOLS: list[str] = []
 
 

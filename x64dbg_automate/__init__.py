@@ -224,10 +224,80 @@ class X64DbgClient(XAutoHighLevelCommandAbstractionMixin, DebugEventQueueMixin):
         self.sess_req_rep_port = 0
         self.sess_pub_sub_port = 0
 
+    def _rebuild_req_socket(self) -> None:
+        """Recreate the REQ socket after a timed-out recv.
+
+        REQ/REP is a strict state machine: a socket that timed out waiting for its
+        reply refuses the next send (EFSM), so a retry has to start from a new one.
+        """
+        port = self.sess_req_rep_port
+        if not port:
+            raise ClientConnectionFailedError("no REQ/REP port to reconnect to")
+        try:
+            self.req_socket.close(linger=0)
+        except Exception:
+            pass
+        self.req_socket = self.context.socket(zmq.REQ)
+        self.req_socket.setsockopt(zmq.CONNECT_TIMEOUT, 6000)
+        self.req_socket.setsockopt(zmq.SNDTIMEO, 6000)
+        self.req_socket.setsockopt(zmq.RCVTIMEO, 10000)
+        self.req_socket.connect(f"tcp://{self.remote_host}:{port}")
+
+    def dismiss_debugger_dialogs_soon(self, seconds: float = 4.0,
+                                      interval: float = 0.2) -> int:
+        """Keep an eye on the debugger for `seconds`, closing message boxes as they pop.
+
+        x64dbg announces script completion with a modal box, but it appears *after*
+        the script command returns, so a single check right after `script_run` is
+        too early (measured: the box showed up later and then blocked the next RPC).
+        """
+        deadline = time.time() + max(0.0, seconds)
+        total = 0
+        while time.time() < deadline:
+            total += self.dismiss_debugger_dialogs()
+            time.sleep(interval)
+        return total
+
+    def dismiss_debugger_dialogs(self) -> int:
+        """Close modal message boxes owned by the debugger process.
+
+        x64dbg announces script completion with a modal MessageBox. While it is up
+        the GUI thread stops pumping, the plugin cannot answer any bridge call, and
+        the client mistakes the silence for a dead connection (every later call
+        then fails with "Not connected"). Closing the box is the only recovery that
+        does not need a human to click OK.
+
+        Returns:
+            Number of dialog boxes closed.
+        """
+        pid = self.session_pid
+        if not pid:
+            return 0
+        try:
+            from x64dbg_automate.win32 import close_dialog_boxes
+            n = close_dialog_boxes(int(pid))
+            if n:
+                logger.warning("closed %d modal dialog(s) blocking the debugger bridge", n)
+            return n
+        except Exception:
+            logger.debug("dismiss_debugger_dialogs failed", exc_info=True)
+            return 0
+
     def _send_request(self, request_type: str, *args) -> tuple:
+        payload = msgpack.packb((request_type, *args))
         with self._req_lock:
-            self.req_socket.send(msgpack.packb((request_type, *args)))
-            msg = msgpack.unpackb(self.req_socket.recv(), use_list=False)
+            try:
+                self.req_socket.send(payload)
+                msg = msgpack.unpackb(self.req_socket.recv(), use_list=False)
+            except zmq.error.Again:
+                # Nothing came back in RCVTIMEO. The dominant cause is a modal box in
+                # the debugger (GuiScriptMessage after a script finishes) blocking the
+                # GUI thread; without this recovery the connection stays poisoned.
+                if not self.dismiss_debugger_dialogs():
+                    raise
+                self._rebuild_req_socket()
+                self.req_socket.send(payload)
+                msg = msgpack.unpackb(self.req_socket.recv(), use_list=False)
         if msg is None:
             raise RuntimeError("Empty response from x64dbg")
         if isinstance(msg, tuple) and len(msg) == 2 and isinstance(msg[0], str) and msg[0].startswith("XERROR_"):

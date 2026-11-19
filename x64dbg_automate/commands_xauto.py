@@ -715,10 +715,19 @@ class XAutoCommandsMixin(XAutoClientBase):
         """
         Runs the loaded script starting at destline (0-based).
 
+        x64dbg pops a **modal** message box when the script finishes. That box
+        blocks the GUI thread and therefore the whole plugin bridge, so it is
+        dismissed here immediately. A script that stops on ``msg``/``msgy`` is
+        auto-confirmed as a result - do not rely on a human answering it.
+
         Returns:
             A tuple of (ok, message)
         """
-        return self._send_request(XAutoCommand.XAUTO_REQ_SCRIPT_RUN, int(destline))
+        res = self._send_request(XAutoCommand.XAUTO_REQ_SCRIPT_RUN, int(destline))
+        # The "script finished" box pops *after* this returns, so watch for a while
+        # instead of checking once - otherwise the next RPC eats the modal block.
+        self.dismiss_debugger_dialogs_soon(4.0)
+        return res
 
     def dbg_cmd_exec(self, command: str, timeout: int = 20) -> tuple[bool, bool, int]:
         """
