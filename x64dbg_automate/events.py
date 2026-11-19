@@ -1,5 +1,5 @@
 from collections import deque
-from enum import StrEnum
+from x64dbg_automate._compat import StrEnum
 import time
 
 from pydantic import BaseModel

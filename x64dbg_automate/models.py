@@ -1,4 +1,6 @@
-from enum import IntEnum, StrEnum
+from enum import IntEnum
+
+from x64dbg_automate._compat import StrEnum
 from pydantic import BaseModel
 
 

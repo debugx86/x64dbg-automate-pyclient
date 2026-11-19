@@ -3,12 +3,19 @@ import queue
 import subprocess
 import time
 import pytest
-from tests.conftest import TEST_BITNESS
+from tests.conftest import TEST_BITNESS, requires_debugger
 from x64dbg_automate import X64DbgClient
 from x64dbg_automate.events import CreateThreadEventData, DbgEvent, EventType, ExceptionEventData
 from x64dbg_automate.models import BreakpointType, HardwareBreakpointType, MemoryBreakpointType, PageRightsConfiguration, StandardBreakpointType
-from x64dbg_automate.win32 import OpenProcess, CreateRemoteThread, WaitForSingleObject, CloseHandle
 import threading
+
+try:  # x64dbg_automate.win32 binds kernel32/user32 and is Windows-only
+    from x64dbg_automate.win32 import OpenProcess, CreateRemoteThread, WaitForSingleObject, CloseHandle
+except (ImportError, AttributeError):  # pragma: no cover - non-Windows collection
+    OpenProcess = CreateRemoteThread = WaitForSingleObject = CloseHandle = None
+
+# Every test here drives a real debugger; they cannot run on a bare Linux/macOS box.
+pytestmark = requires_debugger
 
 
 def test_stepi(client: X64DbgClient):

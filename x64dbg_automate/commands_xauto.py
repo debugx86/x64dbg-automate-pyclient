@@ -1,4 +1,4 @@
-from enum import StrEnum
+from x64dbg_automate._compat import StrEnum
 import time
 
 from x64dbg_automate.client_base import XAutoClientBase
