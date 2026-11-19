@@ -34,7 +34,7 @@ from x64dbg_automate.models import (
 # the local revision lives in pyproject [project].version and must equal this
 # constant — ops/verify.py enforces it). Bump the trailing counter on every
 # further local edit so changes stay diffable against upstream.
-_XAUTO_MCP_PATCH = "0.9.2+local.19"
+_XAUTO_MCP_PATCH = "0.9.2+local.20"
 
 mcp = FastMCP(
     "x64dbg-automate",
@@ -644,24 +644,29 @@ def go(pass_exceptions: bool = False, swallow_exceptions: bool = False) -> str:
 
 
 @mcp.tool()
-def pause(fast: bool = False) -> str:
+def pause(fast: bool = False, force: bool = True) -> str:
     """Pause the debuggee.
 
     x64dbg stops a debuggee by injecting ntdll!DbgUiRemoteBreakin, which exits
     before raising int3 when PEB.BeingDebugged is 0 (anti-anti-debug plugins do
     exactly that) - then the debugger keeps reporting "running". Two fallbacks
     repair that: restoring BeingDebugged for one break-in (~5 s, keeps the real
-    register/stack context), then injecting an int3 thread (~3 ms, but the current
-    thread is the injected one and its context is discarded).
+    register/stack context), then injecting a thread onto a registered int3 page
+    (~0.15 s; the active thread is switched back to the main one afterwards, so
+    registers stay readable).
 
     Args:
-        fast: skip the 5 s BeingDebugged repair and use the int3 thread directly.
-            Use it when you only need the process to stop (memory dumps, scans),
-            not the register context.
+        fast: skip the 5 s BeingDebugged repair and use the int3 page directly.
+            Use it when you only need the process to stop (memory dumps, scans).
+        force: allow those fallbacks at all. With force=False this is the plain
+            x64dbg pause (two break-in attempts) and it does not touch the
+            target. The fallbacks DO modify the target (one PEB byte, an
+            allocated page, an injected thread), so pass force=False when that
+            is not acceptable.
     """
     try:
         client = _require_client()
-        result = client.pause(fast=bool(fast))
+        result = client.pause(fast=bool(fast), force=bool(force))
         return "Paused." if result else "Failed to pause."
     except Exception as e:
         return f"Error: {e}"

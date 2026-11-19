@@ -456,13 +456,19 @@ class XAutoHighLevelCommandAbstractionMixin(XAutoCommandsMixin):
         running). So the page gets a real software breakpoint first, then the thread
         is created on it - the resulting hit is indistinguishable from a user
         breakpoint, and this path never touches ``DbgUiRemoteBreakin``, so neither of
-        its gates matters.
+        its gates matters. Registering is not enough while the debuggee runs, so the
+        0xCC is written by us as well (local.20 - measured: without it the very first
+        call in a session silently fails because x64dbg patches bp bytes on the next
+        pause only).
 
-        The page is allocated once and reused; the injected thread is terminated
-        right after the stop, so no attacker-visible thread is left behind.
+        The page is allocated once and reused (validated against the memory map, so a
+        restarted debuggee does not inherit a dead address); the injected thread is
+        terminated only after switching the active thread back to the main one, so
+        register reads stay usable.
         """
-        page = getattr(self, "_pause_page", 0)
+        page = self._valid_pause_page()
         tid = None
+        landed = False
         try:
             if not page:
                 page = int(self.virt_alloc(0x1000))
@@ -475,21 +481,28 @@ class XAutoHighLevelCommandAbstractionMixin(XAutoCommandsMixin):
                 self._pause_page = page
             if not self.set_breakpoint(page):
                 return False
+            # x64dbg only *registers* a software breakpoint while the debuggee runs -
+            # the 0xCC is patched into memory on the next pause, which by then is too
+            # late: CreateRemoteThread (that is what `createthread` calls) starts the
+            # thread immediately, so it executes the `ret` and exits without ever
+            # stopping. Measured: a fresh session that never paused before returns
+            # False here, while a session that already paused once returns True.
+            # Writing the int3 ourselves makes the first shot work; x64dbg still owns
+            # the entry in its breakpoint table, so the hit is reported as a normal
+            # user breakpoint.
+            if not self.write_memory(page, b"\xCC"):
+                self._clear_pause_bp(page)
+                return False
+            landed = True
             tid = self.thread_create(page, 0)
             if not tid:
-                try:
-                    self.clear_breakpoint(page)
-                except Exception:
-                    pass
+                self._clear_pause_bp(page)
                 return False
-            # The thread only starts once the debuggee runs; hitting the breakpoint is
+            # The thread only runs while the debuggee runs; hitting the breakpoint is
             # what stops us again.
             self.go()
             stopped = bool(self.wait_until_stopped(timeout=timeout))
-            try:
-                self.clear_breakpoint(page)
-            except Exception:
-                pass
+            self._clear_pause_bp(page)
             if not stopped:
                 return False
             # The stop can be a mirage: plugins that hide threads from the debugger
@@ -498,14 +511,56 @@ class XAutoHighLevelCommandAbstractionMixin(XAutoCommandsMixin):
             time.sleep(0.15)
             if self.is_running():
                 return False
+            # The active thread right now is the injected one. Killing it first leaves
+            # the debugger with a dead active thread, and every later register read
+            # answers 0 while pause() claims success. Move to the main thread first
+            # (`switchthread` without an argument means fdProcessInfo->dwThreadId),
+            # then clean the injected thread up.
+            try:
+                self.cmd_sync("switchthread")
+            except Exception:
+                pass
             try:
                 self.thread_terminate(int(tid))
             except Exception:
                 pass
-            logger.info("pause(): stopped via injected breakpoint at %#x", page)
+            cip, ok = self.eval_sync("cip")
+            if not ok or not cip:
+                logger.warning("pause(): int3 fallback stopped the debuggee but the "
+                               "active-thread context is unusable (cip=%r)", cip)
+            else:
+                logger.info("pause(): stopped via injected breakpoint at %#x (cip=%#x)",
+                            page, cip)
             return True
         except Exception:
+            if landed or page:
+                self._clear_pause_bp(page)
             return False
+
+    def _valid_pause_page(self) -> int:
+        """Cached int3 trampoline page, or 0 when it no longer belongs to this debuggee."""
+        page = int(getattr(self, "_pause_page", 0) or 0)
+        if not page:
+            return 0
+        try:
+            for m in self.memmap() or []:
+                base = int(getattr(m, "base_address", 0) or 0)
+                size = int(getattr(m, "region_size", 0) or 0)
+                if base and base <= page < base + max(size, 0x1000):
+                    return page
+        except Exception:
+            pass
+        # The page is gone (new session / restarted debuggee): drop the cache so the
+        # caller allocates a fresh one instead of pointing a thread at a dead address.
+        self._pause_page = 0
+        return 0
+
+    def _clear_pause_bp(self, page: int) -> None:
+        try:
+            if page:
+                self.clear_breakpoint(page)
+        except Exception:
+            pass
 
     def suspend_debuggee(self) -> bool:
         """

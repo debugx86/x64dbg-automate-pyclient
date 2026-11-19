@@ -28,7 +28,8 @@ D:\toolkit\x64dbg-automate\app\      <- 本目录（git 分支 local.3）
 ```
 
 安装方式：`pip install -e . --no-build-isolation --no-deps`（setuptools 后端，不联网）。
-包版本：`0.9.2+local.9`（`PATCH` 常量、`_XAUTO_MCP_PATCH`、pyproject 三处同步，`local_patch_info` 现场可核）。
+包版本：`0.9.2+local.20`（`PATCH` 常量、`_XAUTO_MCP_PATCH`、pyproject 三处同步，`local_patch_info` 现场可核；
+版本演进史在 `CHANGELOG.md`，local.9 及以前见下文）。
 
 ## 现场确认补丁是否加载
 

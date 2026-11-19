@@ -375,6 +375,8 @@ class X64DbgClient(XAutoHighLevelCommandAbstractionMixin, DebugEventQueueMixin):
         # 给 launcher 解析用：有目标就按它的 PE 位数，没有就默认 64（x96dbg 的默认行为）
         bitness = _pe_bitness(target_exe.strip()) if target_exe.strip() else 64
         self._launch_x64dbg(bitness)
+        # New debugger process => the previous int3 trampoline page is gone (local.20).
+        self._pause_page = 0
 
         if target_exe.strip() != "":
             if not self.load_executable(target_exe.strip(), cmdline, current_dir):
@@ -445,6 +447,9 @@ class X64DbgClient(XAutoHighLevelCommandAbstractionMixin, DebugEventQueueMixin):
         if not executed:
             return False
         self._last_target = (target_exe, cmdline or "", current_dir or "")
+        # The debuggee was recreated: its address space is new, so drop the cached
+        # int3 trampoline page (local.20).
+        self._pause_page = 0
         ready = self.wait_until_debugging(timeout)
         if ready and clean_breakpoints:
             # `init` re-loads the .dd64 database just like a fresh launch does.
@@ -518,6 +523,7 @@ class X64DbgClient(XAutoHighLevelCommandAbstractionMixin, DebugEventQueueMixin):
         End the current x64dbg session, terminating the debugger process.
         """
         sid = self.session_pid
+        self._pause_page = 0  # nothing of this session's address space survives (local.20)
         self._xauto_terminate_session()
         self._close_connection()
         if not _IS_WINDOWS or self.x64dbg_path is None:

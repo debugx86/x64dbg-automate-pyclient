@@ -208,3 +208,93 @@ async def a8():
 
 asyncio.run(a8())
 
+_PKG = os.path.dirname(os.path.abspath(_pkg.__file__))
+
+print("=== 9. local.20: pause 兜底要在「从没成功停过」的会话里也能用 ===")
+
+
+async def p20():
+    async with cc(S.mcp._mcp_server) as c:
+        tools = {t.name: t for t in (await c.list_tools()).tools}
+        props = tools["pause"].inputSchema.get("properties", {})
+        print("  pause props:", sorted(props), "| force default:",
+              props.get("force", {}).get("default"))
+        assert {"fast", "force"} <= set(props), (
+            f"MCP pause 必须同时暴露 fast / force，否则调用方无法关掉会改目标的兜底: {sorted(props)}")
+        assert props["force"]["default"] is True, "force 默认值要保持既有行为（True）"
+    txt = open(os.path.join(_PKG, "hla_xauto.py"), encoding="utf-8").read()
+    _needle = 'write_memory(page, b"' + chr(92) + 'xCC")'  # chr(92)=反斜杠，避开转义
+    assert _needle in txt, (
+        "int3 页兜底必须自己写 0xCC：目标 running 时 x64dbg 只登记断点、不落字节，"
+        "全新会话第一次调用必然失败（2026-11-20 ops/pause_int3_firstshot.py 实测）")
+    assert 'cmd_sync("switchthread")' in txt, (
+        "终止注入线程前必须 switchthread：否则活动线程被杀，pause 返回 True "
+        "但之后寄存器全读回 0（作者矩阵 C 行 cip=0x0 即此）")
+    assert "def _valid_pause_page" in txt, "缺少跨会话的页缓存校验"
+    init = open(os.path.join(_PKG, "__init__.py"), encoding="utf-8").read()
+    assert init.count("_pause_page = 0") >= 3, (
+        "start_session / restart_session / terminate_session 三处都要让页缓存失效")
+    print("  自写 int3 / switchthread / 页缓存失效：齐备")
+
+
+asyncio.run(p20())
+
+print("=== 10. local.20: script_run(expect=) 的归因按证据分三类 ===")
+from x64dbg_automate.commands_xauto import XAutoCommandsMixin as _CMD
+
+
+class _AttrFake:
+    """鸭子类型，只喂日志不连调试器：验四种文案分支（script_run 用未绑定方式调）。"""
+
+    def __init__(self, logs):
+        self._logs = logs
+
+    def _send_request(self, cmd, payload=None):
+        return True, "script run requested from line 0"
+
+    def dismiss_debugger_dialogs_soon(self, seconds=4.0, **kw):
+        pass
+
+    def get_log(self, since_index=0, limit=0, filter=""):
+        return 0, list(self._logs), 0, len(self._logs)
+
+
+def _attr(logs, expect="DONE_X"):
+    return _CMD.script_run(_AttrFake(logs), 0, expect=expect, settle=0.5)[1]
+
+
+_hit = _attr(["A_START", "DONE_X"])
+assert "已出现" in _hit, _hit
+_err = _attr(["A_START", '无效的值:"thisisnotacommand"！'])
+assert "日志错误行" in _err and "无效的值" in _err, _err
+_silent = _attr(["没有要删除的断点！", ""])          # 只剩清场噪音 = 等于没日志
+assert "一行日志都没产生" in _silent, _silent
+assert "未知命令是静默失败" not in _silent, "T8 那类误判文案没去掉"
+_last = _attr(["A_START", "MID_1"])
+assert "最后一条日志" in _last and "MID_1" in _last, _last
+for _t in (_err, _silent, _last):
+    print("   -", _t.replace(chr(10), " ")[:110])
+
+
+class _StaleFake:
+    """会话里已经有一条同名旧日志：哨兵只能在本次运行新增的行里找，否则假命中。"""
+
+    def __init__(self, logs):
+        self.logs = list(logs)
+
+    def _send_request(self, cmd, payload=None):
+        return True, "script run requested from line 0"
+
+    def dismiss_debugger_dialogs_soon(self, seconds=4.0, **kw):
+        pass
+
+    def get_log(self, since_index=0, limit=0, filter=""):
+        rows = self.logs[int(since_index):]
+        return len(self.logs), list(rows), 0, 0
+
+
+_stale = _CMD.script_run(_StaleFake(["START", "DONE_X"]), 0,
+                         expect="DONE_X", settle=0.5)[1]
+assert "已出现" not in _stale, (
+    "陈旧哨兵造成假命中：script_run 必须先量日志基数，只扫本次新增的行。got " + repr(_stale))
+print("   - 陈旧哨兵不误判:", _stale.replace(chr(10), " ")[:100])

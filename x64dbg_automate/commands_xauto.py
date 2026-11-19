@@ -735,6 +735,15 @@ class XAutoCommandsMixin(XAutoClientBase):
         Returns:
             A tuple of (ok, message)
         """
+        # 先量日志基数：哨兵只能在"这次运行之后新增的行"里找。整段扫描会让上一次
+        # 运行留下的同名日志造出假"已出现"（local.20 实测踩到：同一个脚本连跑两次，
+        # 第二次即使第 2 行就中止，expect 仍报命中）。
+        base = 0
+        if expect:
+            try:
+                base = int(self.get_log(0, 0, "")[0] or 0)
+            except Exception:
+                base = 0
         res = self._send_request(XAutoCommand.XAUTO_REQ_SCRIPT_RUN, int(destline))
         # The "script finished" box pops *after* this returns, so watch for a while
         # instead of checking once - otherwise the next RPC eats the modal block.
@@ -746,7 +755,7 @@ class XAutoCommandsMixin(XAutoClientBase):
         tail: list[str] = []
         seen = False
         while time.time() < deadline:
-            _, messages, *_ = self.get_log()
+            _, messages, *_ = self.get_log(base, 0, "")
             tail = [m for m in (messages or []) if "modal dialog" not in m]
             if any(expect in m for m in tail):
                 seen = True
@@ -756,15 +765,30 @@ class XAutoCommandsMixin(XAutoClientBase):
         ok, msg = res
         if seen:
             return ok, f"{msg}（哨兵 {expect!r} 已出现）"
-        # 失败时脚本往往一行日志都没产生（未知命令静默），把清场噪音也滤掉，
-        # 免得把 bpc 的"没有要删除的断点"当成脚本输出。
-        noise = ("没有可删除", "没有要删除", "断点已设置", "DLL已载入", "DLL 已载入",
-                 "正在调试", "进程已启动", "数据库文件", "正在读取命令行", "毫秒", "argv[")
+        # 把调试器自己的噪音滤掉，免得把 bpc 的"没有要删除的断点"或 pause 兜底的
+        # "已切换线程！"当成脚本输出。
+        noise = ("没有可删除", "没有要删除", "断点已设置", "断点已删除", "DLL已载入", "DLL 已载入",
+                 "正在调试", "进程已启动", "数据库文件", "正在读取命令行", "毫秒", "argv[",
+                 "已切换线程", "线程已结束运行", "已暂停", "INT3 断点", "线程 ", "Module ",
+                 "载入数据库", "读取命令行", "命令行")
         useful = [m for m in tail if not any(n in m for n in noise) and m.strip()]
-        hint = " | ".join(useful[-3:])[-220:] if useful else "（脚本一行日志都没产生 —— 未知命令是静默失败）"
-        return False, (
-            f"{msg}；脚本没跑到哨兵 {expect!r} —— x64dbg 在第一条失败命令处整体中止，"
-            f"未知命令还不报错。日志尾：{hint}")
+        # 归因按证据分三类，不要把"未知命令静默"当唯一原因写死进结论：
+        #   1) 日志里有错误行 -> 把那一行原样抄出来
+        #   2) 一行日志都没产生 -> 可能命令名不存在（静默中止），也可能脚本本身不打 log
+        #      （实测 lblset / cmtset 成功时不产生任何日志行，旧文案会把它说成未知命令）
+        #   3) 有日志但没到哨兵 -> 报最后一条日志
+        # 依据：2026-11-20 连接器 T8 / T9 / T12 探针。
+        err_keys = ("无效的值", "错误", "Error", "error", "失败")
+        errs = [m for m in useful if any(k in m for k in err_keys)]
+        if errs:
+            why = "失败命令处中止，日志错误行：%s" % errs[-1][:120]
+        elif not useful:
+            why = ("一行日志都没产生 —— 可能命令名不存在（静默中止），"
+                   "也可能脚本本身没写 log（lblset/cmtset 成功时不产生日志）")
+        else:
+            why = "没打出哨兵，最后一条日志：%s" % useful[-1][:120]
+        hint = " | ".join(useful[-3:])[-220:] if useful else "（无）"
+        return False, f"{msg}；脚本没跑到哨兵 {expect!r} —— {why}。日志尾：{hint}"
 
     def dbg_cmd_exec(self, command: str, timeout: int = 20) -> tuple[bool, bool, int]:
         """
