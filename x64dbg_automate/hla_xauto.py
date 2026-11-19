@@ -1,8 +1,13 @@
+import logging
 import os
 import time
 from x64dbg_automate.commands_xauto import XAutoCommandsMixin
 from x64dbg_automate.models import HardwareBreakpointType, MemPage, \
     MemoryBreakpointType, MutableRegister, PageRightsConfiguration, ReferenceViewRef, StandardBreakpointType
+
+# 之前 pause() 的失败分支直接引用了 logger，但本模块没定义它 —— 一旦真的走到
+# 那条分支就是 NameError，把"pause 失败"变成"抛异常"。顺手补上。
+logger = logging.getLogger(__name__)
 
 
 class XAutoHighLevelCommandAbstractionMixin(XAutoCommandsMixin):
@@ -307,7 +312,7 @@ class XAutoHighLevelCommandAbstractionMixin(XAutoCommandsMixin):
             raise ValueError(f"Failed to evaluate register {reg}")
         return res
     
-    def pause(self) -> bool:
+    def pause(self, force: bool = True, fast: bool = False) -> bool:
         """
         Pauses the debugee. This method will block until the debugee is in the stopped state.
 
@@ -318,6 +323,30 @@ class XAutoHighLevelCommandAbstractionMixin(XAutoCommandsMixin):
         This implementation issues the second pause itself instead of leaving that to
         every caller. Local patch (local.3).
 
+        If that still fails, the two fallbacks below run in order (local.19). Both
+        exist because x64dbg's break-in thread is ``ntdll!DbgUiRemoteBreakin``, whose
+        first two instructions abort the thread *before* any exception is produced:
+
+            cmp byte ptr gs:[0x60+2], 0    ; PEB.BeingDebugged
+            jnz  ok
+            test byte ptr ds:[0x7FFE02D4], 2
+            jz   exit_thread               ; -> RtlExitUserThread(0)
+        ok: mov rax, gs:[0x30]             ; TEB
+            test byte ptr [rax+0x17EE], 0x20
+            jnz  exit_thread
+            call DbgBreakPoint             ; only now an int3 shows up
+
+        Anti-anti-debug plugins flip PEB.BeingDebugged to 0, so the thread exits and
+        x64dbg never sees ``EXCEPTION_BREAKPOINT`` - it keeps reporting "running".
+
+        Args:
+            force: try the fallbacks when the regular break-in fails
+            fast: skip the BeingDebugged fallback and go straight to the int3 page.
+                The int3 route stops in ~3 ms but lands on the injected thread, so
+                register/stack context is gone (that thread is terminated again);
+                the BeingDebugged route takes ~5 s and stops at the real execution
+                point, which is what you usually want before reading registers.
+
         Returns:
             True if successful, False otherwise
         """
@@ -325,40 +354,169 @@ class XAutoHighLevelCommandAbstractionMixin(XAutoCommandsMixin):
             return False
         if not self.is_running():
             return True
+        # If PEB.BeingDebugged is already 0, the injected break-in thread is
+        # guaranteed to exit before raising int3 (that is the first gate), so the
+        # two regular pause calls below can only waste ~5 s. Skip straight to the
+        # repair paths instead.
+        gate_closed = self._being_debugged_gate_closed()
         started = time.time()
-        try:
-            self.cmd_sync("pause")
-        except Exception:
-            pass
-        if self.wait_until_stopped(timeout=1.2):
+        if not gate_closed:
+            try:
+                self.cmd_sync("pause")
+            except Exception:
+                pass
+            if self.wait_until_stopped(timeout=1.2):
+                return True
+            # The break-in fallback needs ~2 s since the previous pause command.
+            remain = 2.25 - (time.time() - started)
+            if remain > 0:
+                time.sleep(remain)
+            if not self.is_running():
+                return True
+            try:
+                self.cmd_sync("pause")
+            except Exception:
+                pass
+            if self.wait_until_stopped(timeout=3):
+                return True
+        if not force:
+            return False
+        if not fast and self._pause_via_being_debugged():
             return True
-        # The break-in fallback needs ~2 s since the previous pause command.
-        remain = 2.25 - (time.time() - started)
-        if remain > 0:
-            time.sleep(remain)
-        if not self.is_running():
+        if self._pause_via_int3_page():
             return True
+        logger.warning(
+            "pause() could not stop the debuggee (break-in thread died before raising "
+            "int3, and both fallbacks failed). suspend_debuggee() freezes the process "
+            "via NtSuspendProcess instead, at the cost of x64dbg still reporting running.")
+        return False
+
+    def _being_debugged_gate_closed(self) -> bool:
+        """True when PEB.BeingDebugged == 0, i.e. DbgUiRemoteBreakin will bail out."""
         try:
-            self.cmd_sync("pause")
+            peb, ok = self.eval_sync("peb()")
+            if not ok or not peb:
+                return False
+            return self.read_memory(peb + 2, 1)[:1] == b"\x00"
         except Exception:
-            pass
-        paused = bool(self.wait_until_stopped(timeout=3))
-        if not paused:
-            logger.warning(
-                "pause() could not stop the debuggee. If an anti-anti-debug plugin "
-                "(ScyllaHide) is active it swallows the break-in thread; "
-                "suspend_debuggee() freezes the process via NtSuspendProcess instead.")
-        return paused
+            return False
+
+    def _pause_via_being_debugged(self, timeout: float = 2.5) -> bool:
+        """Re-open the first gate: write PEB.BeingDebugged back to 1.
+
+        ``ntdll!DbgUiRemoteBreakin`` checks that byte first and bails out when it is
+        0 - exactly what anti-anti-debug plugins write. Restoring it for the duration
+        of one break-in lets x64dbg's own mechanism work again; the original value is
+        put back afterwards, so the debuggee never observes a debugger while it runs.
+        """
+        try:
+            peb, ok = self.eval_sync("peb()")
+        except Exception:
+            return False
+        if not ok or not peb:
+            return False
+        try:
+            original = self.read_memory(peb + 2, 1)
+        except Exception:
+            return False
+        if original[:1] == b"\x01":
+            # Gate already open, so writing it cannot change anything - let the
+            # int3 fallback have a go instead of waiting for another 2 s cycle.
+            return False
+        try:
+            self.write_memory(peb + 2, b"\x01")
+        except Exception:
+            return False
+        try:
+            for _ in range(2):
+                if not self.is_running():
+                    return True
+                try:
+                    self.cmd_sync("pause")
+                except Exception:
+                    pass
+                if self.wait_until_stopped(timeout=timeout):
+                    logger.info("pause(): stopped after restoring PEB.BeingDebugged")
+                    return True
+                time.sleep(2.1)
+            return False
+        finally:
+            try:
+                self.write_memory(peb + 2, original)
+            except Exception:
+                logger.warning("could not restore PEB.BeingDebugged to %r", original)
+
+    def _pause_via_int3_page(self, timeout: float = 3.0) -> bool:
+        """Inject a thread that starts on a *registered* breakpoint.
+
+        A raw ``0xCC`` byte is not enough: x64dbg only stops when the int3 maps to a
+        breakpoint it knows about, otherwise the first-chance exception is passed
+        through and the thread simply exits (measured under ScyllaHide: log shows
+        ``EXCEPTION_DEBUG_INFO dwFirstChance: 1`` followed by ``线程退出``, state stays
+        running). So the page gets a real software breakpoint first, then the thread
+        is created on it - the resulting hit is indistinguishable from a user
+        breakpoint, and this path never touches ``DbgUiRemoteBreakin``, so neither of
+        its gates matters.
+
+        The page is allocated once and reused; the injected thread is terminated
+        right after the stop, so no attacker-visible thread is left behind.
+        """
+        page = getattr(self, "_pause_page", 0)
+        tid = None
+        try:
+            if not page:
+                page = int(self.virt_alloc(0x1000))
+                if not page:
+                    return False
+                # ret: once the breakpoint is cleared, the thread falls through and
+                # exits instead of executing the rest of the page.
+                if not self.write_memory(page, b"\xC3"):
+                    return False
+                self._pause_page = page
+            if not self.set_breakpoint(page):
+                return False
+            tid = self.thread_create(page, 0)
+            if not tid:
+                try:
+                    self.clear_breakpoint(page)
+                except Exception:
+                    pass
+                return False
+            # The thread only starts once the debuggee runs; hitting the breakpoint is
+            # what stops us again.
+            self.go()
+            stopped = bool(self.wait_until_stopped(timeout=timeout))
+            try:
+                self.clear_breakpoint(page)
+            except Exception:
+                pass
+            if not stopped:
+                return False
+            # The stop can be a mirage: plugins that hide threads from the debugger
+            # (ScyllaHide's NtSetInformationThreadHook) let the hit be reported and
+            # then keep going, so confirm it held before telling the caller we paused.
+            time.sleep(0.15)
+            if self.is_running():
+                return False
+            try:
+                self.thread_terminate(int(tid))
+            except Exception:
+                pass
+            logger.info("pause(): stopped via injected breakpoint at %#x", page)
+            return True
+        except Exception:
+            return False
 
     def suspend_debuggee(self) -> bool:
         """
         Freezes every debuggee thread from outside the debugger.
 
-        Fallback for the pause path: x64dbg stops a debuggee by injecting a
-        break-in thread, and ScyllaHide & co. hook thread creation so that thread
-        dies before it can break in (log: "线程 xxx 已创建" followed by
-        "线程 xxx 退出"). NtSuspendProcess does not involve the debugger, so those
-        hooks never see it.
+        Fallback for the pause path. x64dbg stops a debuggee by injecting
+        ``ntdll!DbgUiRemoteBreakin``, and that routine exits *before* raising int3
+        when ``PEB.BeingDebugged`` is 0 (what anti-anti-debug plugins enforce) or
+        when ``[TEB+0x17EE] & 0x20`` is set. ``pause()`` now repairs the first case
+        itself, but if both of its fallbacks fail this one still works: NtSuspendProcess
+        does not involve the debugger at all.
 
         Note this is *not* a debugger pause: x64dbg keeps reporting "running" and
         register reads stay frozen snapshots. What it gives you is a process that
