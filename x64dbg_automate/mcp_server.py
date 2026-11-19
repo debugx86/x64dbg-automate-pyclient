@@ -34,7 +34,7 @@ from x64dbg_automate.models import (
 # the local revision lives in pyproject [project].version and must equal this
 # constant — ops/verify.py enforces it). Bump the trailing counter on every
 # further local edit so changes stay diffable against upstream.
-_XAUTO_MCP_PATCH = "0.9.2+local.15"
+_XAUTO_MCP_PATCH = "0.9.2+local.16"
 
 mcp = FastMCP(
     "x64dbg-automate",
@@ -445,6 +445,35 @@ def start_session(x64dbg_path: str = "", target_exe: str = "", cmdline: str = ""
         return f"Session started with {Path(resolved).name}. Debugger PID: {pid}{note}"
     except Exception as e:
         _client = None
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def suspend_debuggee(suspend: bool = True) -> str:
+    """Freeze or thaw every debuggee thread from outside the debugger.
+
+    Fallback for when `pause` cannot stop the debuggee: anti-anti-debug plugins
+    hook thread creation, so x64dbg's break-in thread dies before it can break in
+    (log shows "线程 ... 已创建" then "线程 ... 退出" immediately) and pause keeps
+    timing out. NtSuspendProcess ignores the debugger entirely.
+
+    This is not a debugger pause: x64dbg still reports "running" and register
+    reads remain frozen snapshots. Use it to stop the process from executing
+    (stable memory for dumps/scans), then suspend=False to thaw.
+
+    Args:
+        suspend: True to freeze, False to thaw
+    """
+    try:
+        client = _require_client()
+        if suspend:
+            ok = client.suspend_debuggee()
+            return ("Debuggee threads suspended (NtSuspendProcess). "
+                    "x64dbg state is still 'running'." if ok
+                    else "Error: NtSuspendProcess failed (see get_log / elevation)")
+        ok = client.resume_debuggee()
+        return "Debuggee threads resumed." if ok else "Error: NtResumeProcess failed"
+    except Exception as e:
         return f"Error: {e}"
 
 

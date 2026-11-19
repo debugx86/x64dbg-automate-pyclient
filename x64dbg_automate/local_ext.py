@@ -14,7 +14,7 @@ into real source. What changed vs p2:
 * ``find_bytes`` reports when the 64 MB scan cap truncated the range;
 * ``parse_addr`` helper honours the same expression fallback as the MCP tools.
 
-Patch set: local.3 → local.15. The authoritative current value is the ``PATCH``
+Patch set: local.3 → local.16. The authoritative current value is the ``PATCH``
 constant below — version numbers written in prose drift, this one did.
 """
 
@@ -29,7 +29,7 @@ import sys
 MEM_IMAGE = 0x1000000
 _MAX_SCAN = 64 * 1024 * 1024
 
-PATCH = "0.9.2+local.15"
+PATCH = "0.9.2+local.16"
 LOCAL_TOOLS: list[str] = []
 
 
@@ -108,6 +108,29 @@ def _parse_pattern(pattern: str):
             vals.append(int(tok, 16))
             masks.append(0xFF)
     return vals, masks
+
+
+def _scan_all(client, start: int, size: int, vals, masks, max_hits: int):
+    """Scan the whole range in 64 MB windows so large regions are not truncated.
+
+    Windows overlap by len(pattern)-1 bytes so a match cannot straddle a seam;
+    hits are de-duplicated because of that overlap.
+    """
+    plen = max(1, len(vals))
+    hits: list[int] = []
+    off = 0
+    covered_end = start
+    while off < size and len(hits) < max_hits:
+        n = min(_MAX_SCAN, size - off)
+        seg_hits, _, _ = _scan_bytes(client, start + off, n, vals, masks, max_hits - len(hits))
+        for a in seg_hits:
+            if a not in hits:
+                hits.append(a)
+        covered_end = max(covered_end, start + off + n)
+        if off + n >= size:
+            break
+        off += max(1, n - (plen - 1))
+    return hits, covered_end - start, False
 
 
 def _scan_bytes(client, start: int, size: int, vals, masks, max_hits: int):
@@ -209,6 +232,15 @@ k32.WriteConsoleInputW.restype = W.BOOL
 k32.GetConsoleScreenBufferInfo.argtypes = [W.HANDLE, ctypes.POINTER(CSBI)]
 k32.ReadConsoleOutputCharacterW.argtypes = [W.HANDLE, W.LPWSTR, W.DWORD, COORD, ctypes.POINTER(W.DWORD)]
 
+class CHAR_INFO_CHAR(ctypes.Union):
+    _fields_ = [("UnicodeChar", W.WCHAR), ("AsciiChar", ctypes.c_char)]
+
+class CHAR_INFO(ctypes.Structure):
+    _fields_ = [("Char", CHAR_INFO_CHAR), ("Attributes", W.WORD)]
+
+k32.ReadConsoleOutputW.argtypes = [W.HANDLE, ctypes.POINTER(CHAR_INFO), COORD, COORD, ctypes.POINTER(SMALL_RECT)]
+k32.ReadConsoleOutputW.restype = W.BOOL
+
 def done(**kw):
     print(json.dumps(kw))
     sys.exit(0)
@@ -251,16 +283,26 @@ if not h or h == 0xFFFFFFFFFFFFFFFF:
 info = CSBI()
 if not k32.GetConsoleScreenBufferInfo(h, ctypes.byref(info)):
     done(ok=False, err="GetConsoleScreenBufferInfo failed (%d)" % ctypes.get_last_error())
-total = max(1, info.dwSize.X * info.dwSize.Y)
-buf = ctypes.create_unicode_buffer(total + 1)
-read = W.DWORD(0)
-ok = k32.ReadConsoleOutputCharacterW(h, buf, total, COORD(0, 0), ctypes.byref(read))
+w, hgt = max(1, info.dwSize.X), max(1, info.dwSize.Y)
+cells = (CHAR_INFO * (w * hgt))()
+region = SMALL_RECT(0, 0, w - 1, hgt - 1)
+ok = k32.ReadConsoleOutputW(h, cells, COORD(w, hgt), COORD(0, 0), ctypes.byref(region))
 k32.CloseHandle(h)
 if not ok:
-    done(ok=False, err="ReadConsoleOutputCharacterW failed (%d)" % ctypes.get_last_error())
-width = max(1, info.dwSize.X)
-chars = buf[:read.value].replace("\r", "").replace("\n", "")
-rows = [chars[i:i + width].rstrip() for i in range(0, len(chars), width)]
+    done(ok=False, err="ReadConsoleOutputW failed (%d)" % ctypes.get_last_error())
+rows = []
+for y in range(hgt):
+    line = []
+    for x in range(w):
+        ci = cells[y * w + x]
+        # COMMON_LVB_TRAILING_BYTE (0x0200) marks the second cell of a
+        # double-width character. The old ReadConsoleOutputCharacterW path counted
+        # cells as characters, so every CJK glyph shifted the rest of the row.
+        if ci.Attributes & 0x0200:
+            continue
+        ch = ci.Char.UnicodeChar
+        line.append(ch if ch not in ("\x00", "\ufffd") else " ")
+    rows.append("".join(line).rstrip())
 while rows and not rows[0]:
     rows.pop(0)
 while rows and not rows[-1]:
@@ -373,13 +415,13 @@ def read_console(max_chars: int = 6000) -> str:
 def find_bytes(pattern: str, start: str = "", size: int = 0, max_hits: int = 16) -> str:
     """Search memory for a byte pattern; ?? wildcard allowed ("48 8B ?? 05").
 
-    Empty start/size scans the main module. 64 MB cap per scan; the result says
-    "truncated" when the cap was hit.
+    Empty start/size scans the main module. Large ranges are walked in 64 MB
+    windows, so nothing is truncated; pass start/size to narrow it down.
     """
     try:
         vals, masks = _parse_pattern(pattern)
         lo, length = _default_range(_client(), start, size)
-        hits, covered, truncated = _scan_bytes(_client(), lo, length, vals, masks, max_hits)
+        hits, covered, truncated = _scan_all(_client(), lo, length, vals, masks, max_hits)
         note = f" [truncated at 64 MB of {length:,}]" if truncated else ""
         if not hits:
             return f"No match in {_fmt(lo)}+{length:,}{note}"
@@ -418,6 +460,83 @@ _RIP_FIRST = bytes(sorted(set(list(_RIP_OP_IMM) + [0xFF] + list(range(0x40, 0x50
 # 反汇编文本里的绝对内存操作数：[0x140000117] / [7FF6C2E30250] / 32 位 [00404040]
 # 不匹配 [rsp+0x20]、[rax+8] 这类寄存器相对寻址（那不是静态引用，本来就不算 xref）
 _ABS_MEM_RE = re.compile(r"\[\s*(?:0x)?([0-9A-Fa-f]{8,16})\s*\]")
+
+
+# ---------------------------------------------------------------------------
+# Linear scan engine (local.16)
+#
+# The plugin walks the range itself and returns every (from, to) edge in one
+# round-trip. That replaces the old "one IPC per instruction" deep path and also
+# gives real instruction boundaries, so data bytes are no longer mistaken for
+# references. Results are cached per (session, range): a 3 MB module costs a few
+# hundred milliseconds once and nothing afterwards.
+# ---------------------------------------------------------------------------
+_XREF_CACHE: dict = {}
+
+
+def _exec_ranges(client, base: int, size: int):
+    """Executable image ranges inside [base, base+size), adjacent pages merged.
+
+    Walking only code pages is what keeps a large module affordable: .data/.rsrc/
+    .reloc never hold instructions, so disassembling them costs time and invents
+    edges out of arbitrary bytes. Edge targets are still filtered against the
+    whole module (the target window is passed separately to the plugin).
+    """
+    end = base + size
+    ranges: list[tuple[int, int]] = []
+    try:
+        for p in client.memmap():
+            pb = int(p.base_address)
+            if pb < base or pb >= end:
+                continue
+            if p.type != MEM_IMAGE:
+                continue
+            if not (int(p.protect) & 0xF0):  # PAGE_EXECUTE / _READ / _READWRITE / _WRITECOPY
+                continue
+            pe = min(pb + int(p.region_size), end)
+            if ranges and ranges[-1][0] + ranges[-1][1] == pb:
+                ranges[-1] = (ranges[-1][0], pe - ranges[-1][0])
+            else:
+                ranges.append((pb, pe - pb))
+    except Exception:
+        pass
+    return ranges or [(base, size)]
+
+
+def _linear_edges(client, base: int, size: int, refresh: bool = False):
+    """Return (index, stats) where index maps target -> [referencing addresses]."""
+    key = (getattr(client, "session_pid", 0), int(base), int(size))
+    if not refresh and key in _XREF_CACHE:
+        idx, st = _XREF_CACHE[key]
+        return idx, {**st, "cached": True}
+
+    index: dict = {}
+    total_edges = 0
+    total_instrs = 0
+    total_ms = 0
+    segments = 0
+    for seg_base, seg_size in _exec_ranges(client, base, size):
+        ok, edge_count, instr_count, elapsed_ms, edges, err = client.analyse_linear(
+            seg_base, seg_size, int(base), int(size))
+        if not ok:
+            raise RuntimeError(err or "analyse_linear failed")
+        segments += 1
+        total_edges += int(edge_count)
+        total_instrs += int(instr_count)
+        total_ms += int(elapsed_ms)
+        for frm, to in edges:
+            index.setdefault(int(to), []).append(int(frm))
+
+    stats = {
+        "edges": total_edges,
+        "instrs": total_instrs,
+        "ms": total_ms,
+        "targets": len(index),
+        "segments": segments,
+        "cached": False,
+    }
+    _XREF_CACHE[key] = (index, stats)
+    return index, stats
 
 
 def _xref_deep(client, lo: int, length: int, tgt: int, max_hits: int):
@@ -468,7 +587,32 @@ def xref(target: str, start: str = "", size: int = 0, max_hits: int = 32,
     try:
         client = _client()
         tgt = _addr(target)
-        # 快路径依赖 RIP 相对编码，x86 下算出的目标是错的 → 明说，别给假结论
+        lo, length = _default_range(client, start, size)
+
+        # local.16: the plugin performs the whole walk in one round-trip. It covers
+        # the 0F family and 32-bit absolute operands (what deep=True was needed
+        # for), respects instruction boundaries (no data-section false positives),
+        # and does not touch the GUI. Falls through to the old paths when the
+        # plugin is too old or the debuggee is running (linear refuses then).
+        try:
+            index, lstats = _linear_edges(client, lo, length)
+        except Exception:
+            index = lstats = None
+        if index is not None:
+            refs = index.get(tgt, [])
+            if not refs:
+                return (f"No xref to {_fmt(tgt)} in {_fmt(lo)}+{length:,} "
+                        f"(linear scan: {lstats['instrs']:,} instrs, "
+                        f"{lstats['edges']:,} edges, {lstats['ms']} ms)")
+            lines = [f"{len(refs)} xref(s) to {_fmt(tgt)} (linear scan):"]
+            for va in refs[:max_hits]:
+                ins = client.disassemble_at(va)
+                lines.append(f"  {_fmt(va)}  {ins.symbolized_instruction if ins else '???'}")
+            if len(refs) > max_hits:
+                lines.append(f"  ... {len(refs) - max_hits} more (raise max_hits)")
+            return "\n".join(lines)
+
+        # Fallback: 快路径依赖 RIP 相对编码，x86 下算出的目标是错的 → 明说，别给假结论
         if not deep:
             try:
                 if client.debugee_bitness() == 32:
@@ -477,7 +621,6 @@ def xref(target: str, start: str = "", size: int = 0, max_hits: int = 32,
                             f"或 find_bytes 搜 {tgt & 0xFFFFFFFF:08X} 的小端字节。")
             except Exception:
                 pass
-        lo, length = _default_range(client, start, size)
         if deep:
             # 原生分析库优先：一次 RPC 拿全部引用点；未分析/无结果再退回扫描
             try:
@@ -575,6 +718,30 @@ def xref(target: str, start: str = "", size: int = 0, max_hits: int = 32,
             ins = client.disassemble_at(va)
             lines.append(f"  {_fmt(va)}  {ins.symbolized_instruction if ins else '???'}")
         return "\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def analyse_linear(target: str, size: int = 0, refresh: bool = False) -> str:
+    """Scan a range for cross-references inside the plugin.
+
+    Disassembles every instruction in the range and records operands whose value
+    points back into it. No GUI selection is involved, so it works headless, and
+    the whole range is one round-trip. This is the engine `xref` uses.
+
+    Args:
+        target: Module name/address, or the range start when size is given
+        size: Range length in bytes (default: the whole module)
+        refresh: Re-scan instead of using the cached result for this session/range
+    """
+    try:
+        client = _client()
+        lo, length = _default_range(client, target, size)
+        index, stats = _linear_edges(client, lo, length, refresh=refresh)
+        state = "rescan" if refresh else ("cached" if not stats["cached"] and refresh else "scan")
+        return (f"linear scan {_fmt(lo)}+{length:,}: {stats['instrs']:,} instructions, "
+                f"{stats['edges']:,} edges -> {stats['targets']:,} distinct targets, "
+                f"{stats['ms']} ms ({state})")
     except Exception as e:
         return f"Error: {e}"
 
@@ -776,7 +943,7 @@ def register(mcp) -> None:
     """Register every local tool on the given FastMCP instance."""
     for fn in (skip_call, send_stdin, read_console, find_bytes, find_string,
                xref, modules, disasm_json, exec_command_out, get_module_path,
-               analyse_range, script_load, script_run, dbg_cmd_exec,
+               analyse_range, analyse_linear, script_load, script_run, dbg_cmd_exec,
                local_patch_info):
         mcp.tool()(fn)
         LOCAL_TOOLS.append(fn.__name__)

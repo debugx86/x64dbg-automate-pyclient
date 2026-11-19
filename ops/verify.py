@@ -103,6 +103,17 @@ async def b1():
                 f"{name}.clean_breakpoints 必须默认 True：x64dbg 每次加载都会重放 "
                 f".dd64（实测 bpc 清空后退出不落盘，下次启动断点全回来）。got {default!r}")
 
+print("=== 3c. local.16: 插件内线性分析 + 外部挂起工具已注册 ===")
+async def c1():
+    async with cc(S.mcp._mcp_server) as c:
+        tools = {t.name: t for t in (await c.list_tools()).tools}
+        for name in ("analyse_linear", "suspend_debuggee"):
+            assert name in tools, f"{name} 工具没注册"
+            props = sorted(tools[name].inputSchema.get("properties", {}))
+            print(f"  {name}: ok  props={props}")
+        assert "refresh" in tools["analyse_linear"].inputSchema["properties"]
+        assert "suspend" in tools["suspend_debuggee"].inputSchema["properties"]
+
 print("=== 4. local_patch_info ===")
 print("  " + LE.local_patch_info().replace("\n", "\n  "))
 
@@ -150,6 +161,7 @@ asyncio.run(tools())
 asyncio.run(a1())
 asyncio.run(a2())
 asyncio.run(b1())
+asyncio.run(c1())
 
 print("=== 7. pause 不再假成功：无 debuggee 时必须 False ===")
 from x64dbg_automate import X64DbgClient

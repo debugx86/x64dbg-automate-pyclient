@@ -342,7 +342,54 @@ class XAutoHighLevelCommandAbstractionMixin(XAutoCommandsMixin):
             self.cmd_sync("pause")
         except Exception:
             pass
-        return bool(self.wait_until_stopped(timeout=3))
+        paused = bool(self.wait_until_stopped(timeout=3))
+        if not paused:
+            logger.warning(
+                "pause() could not stop the debuggee. If an anti-anti-debug plugin "
+                "(ScyllaHide) is active it swallows the break-in thread; "
+                "suspend_debuggee() freezes the process via NtSuspendProcess instead.")
+        return paused
+
+    def suspend_debuggee(self) -> bool:
+        """
+        Freezes every debuggee thread from outside the debugger.
+
+        Fallback for the pause path: x64dbg stops a debuggee by injecting a
+        break-in thread, and ScyllaHide & co. hook thread creation so that thread
+        dies before it can break in (log: "线程 xxx 已创建" followed by
+        "线程 xxx 退出"). NtSuspendProcess does not involve the debugger, so those
+        hooks never see it.
+
+        Note this is *not* a debugger pause: x64dbg keeps reporting "running" and
+        register reads stay frozen snapshots. What it gives you is a process that
+        stops executing, so memory stops changing (safe to dump/scan), until
+        resume_debuggee() is called.
+
+        Returns:
+            True if every thread was suspended
+        """
+        if not self.is_debugging():
+            return False
+        pid = self.debugee_pid()
+        if not pid:
+            return False
+        from x64dbg_automate.win32 import suspend_process
+        return bool(suspend_process(int(pid)))
+
+    def resume_debuggee(self) -> bool:
+        """
+        Thaws a debuggee frozen by suspend_debuggee() (NtResumeProcess).
+
+        Returns:
+            True if the resume call succeeded
+        """
+        if not self.is_debugging():
+            return False
+        pid = self.debugee_pid()
+        if not pid:
+            return False
+        from x64dbg_automate.win32 import resume_process
+        return bool(resume_process(int(pid)))
     
     def set_breakpoint(self, address_or_symbol: int | str, name: str | None = None, bp_type: StandardBreakpointType = StandardBreakpointType.Short, singleshoot: bool = False) -> bool:
         """

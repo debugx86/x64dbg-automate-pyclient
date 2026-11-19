@@ -43,6 +43,7 @@ class XAutoCommand(StrEnum):
     XAUTO_REQ_FUNCTION_TYPE_AT = "XAUTO_REQ_FUNCTION_TYPE_AT"
     XAUTO_REQ_MODULE_PATH = "XAUTO_REQ_MODULE_PATH"
     XAUTO_REQ_ANALYSE_RANGE = "XAUTO_REQ_ANALYSE_RANGE"
+    XAUTO_REQ_ANALYSE_LINEAR = "XAUTO_REQ_ANALYSE_LINEAR"
     XAUTO_REQ_SCRIPT_LOAD = "XAUTO_REQ_SCRIPT_LOAD"
     XAUTO_REQ_SCRIPT_RUN = "XAUTO_REQ_SCRIPT_RUN"
     XAUTO_REQ_DBG_CMD_EXEC = "XAUTO_REQ_DBG_CMD_EXEC"
@@ -674,6 +675,32 @@ class XAutoCommandsMixin(XAutoClientBase):
         """
         return self._send_request(XAutoCommand.XAUTO_REQ_ANALYSE_RANGE,
                                   int(addr), int(size), str(mode), int(timeout))
+
+    def analyse_linear(self, base: int, size: int,
+                       target_base: int = 0, target_size: int = 0):
+        """
+        Runs a linear xref scan inside the plugin: every instruction in
+        [base, base+size) is disassembled and operands pointing back into the
+        range are recorded as edges.
+
+        This is a port of x64dbg's own XrefsAnalysis that does not touch the GUI
+        disassembly selection, so unlike analyse_range it works without the CPU
+        window. The whole range costs one round-trip instead of one per
+        instruction, which is what makes xref lookups fast.
+
+        Args:
+            base: Start address of the range to disassemble (must be mapped)
+            size: Length of that range in bytes (64 MB per call)
+            target_base: Keep edges pointing into this window instead (default: base)
+            target_size: Length of the target window (default: size)
+
+        Returns:
+            A tuple of (ok, edge_count, instruction_count, elapsed_ms, edges, error)
+            where edges is a list of (from, to) pairs
+        """
+        return self._send_request(XAutoCommand.XAUTO_REQ_ANALYSE_LINEAR,
+                                  int(base), int(size),
+                                  int(target_base), int(target_size))
 
     def script_load(self, path: str) -> tuple[bool, str]:
         """
