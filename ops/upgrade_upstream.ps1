@@ -3,7 +3,7 @@
 param([string]$Ref = "")
 $ErrorActionPreference = "Stop"
 $py = "C:\Python314\python.exe"
-Set-Location "D:\od\x64dbg-automate-fork"
+Set-Location "D:\toolkit\x64dbg-automate\app"
 
 Write-Host "[1/5] fetch origin"
 git fetch origin

@@ -34,7 +34,7 @@ from x64dbg_automate.models import (
 # the local revision lives in pyproject [project].version and must equal this
 # constant — ops/verify.py enforces it). Bump the trailing counter on every
 # further local edit so changes stay diffable against upstream.
-_XAUTO_MCP_PATCH = "0.9.2+local.13"
+_XAUTO_MCP_PATCH = "0.9.2+local.14"
 
 mcp = FastMCP(
     "x64dbg-automate",
@@ -438,6 +438,28 @@ def start_session(x64dbg_path: str = "", target_exe: str = "", cmdline: str = ""
         return f"Session started with {Path(resolved).name}. Debugger PID: {pid}"
     except Exception as e:
         _client = None
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def restart_session(target_exe: str = "", timeout: int = 25) -> str:
+    """Restart the debuggee inside the current debugger session.
+
+    Keeps the debugger process alive, so breakpoints, the .dd64 database and any
+    analysis already done survive the restart. x64dbg has no `rerun` command; this
+    queues stop + init on the command thread (DbgCmdExec) instead.
+
+    Args:
+        target_exe: Executable to load (default: the one passed to start_session)
+        timeout: Seconds to wait for the restart
+    """
+    try:
+        client = _require_client()
+        if not client.restart_session(target_exe.strip() or None, timeout=max(5, int(timeout))):
+            return "Error: restart did not bring a debuggee back (check get_log)"
+        pid = client.debugee_pid()
+        return f"Debuggee restarted. Debuggee PID: {pid}"
+    except Exception as e:
         return f"Error: {e}"
 
 
@@ -1004,7 +1026,9 @@ def get_register(register: str) -> str:
         # is running returns a frozen snapshot from the last stop, which silently
         # misleads callers. Refuse instead of auto-pausing: pausing changes
         # debugger state implicitly and is harder to diagnose than a clear error.
-        if client.is_running():
+        # `is True` rather than plain truthiness: the bridge answers with a real
+        # bool, while mocks/None must not trip the guard (see test_get_reg).
+        if client.is_running() is True:
             return ("Error: debuggee is running, so register values are a frozen snapshot. "
                     "Call the pause tool first (client.pause() issues the second break-in pause "
                     "itself, so a single call also works for kernel waits), or use "

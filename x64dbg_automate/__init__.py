@@ -121,6 +121,7 @@ class X64DbgClient(XAutoHighLevelCommandAbstractionMixin, DebugEventQueueMixin):
         self.sess_pub_sub_port = pub_sub_port
         self.remote_host = remote_host
         self._req_lock = threading.Lock()
+        self._last_target: tuple[str, str, str] | None = None
         self._init_event_queues(log_event_queue_maxlen)
         all_instances.append(self)
 
@@ -286,7 +287,63 @@ class X64DbgClient(XAutoHighLevelCommandAbstractionMixin, DebugEventQueueMixin):
                 self.terminate_session()
                 raise RuntimeError("Failed to load executable")
             self.wait_cmd_ready()
+            # Remembered so restart_session() can relaunch the same target without
+            # the caller having to keep the path around (A11).
+            self._last_target = (target_exe.strip(), cmdline, current_dir)
         return self.session_pid
+
+    def restart_session(self, target_exe: str | None = None, cmdline: str | None = None,
+                        current_dir: str | None = None, timeout: int = 25) -> bool:
+        """
+        Restarts the debuggee *inside* the current debugger session.
+
+        Unlike terminate_session() + start_session(), the debugger process stays
+        alive, so the plugin connection, the breakpoint database and any analysis
+        already performed survive the restart. Implemented by queueing ``stop``
+        followed by ``init "<path>"`` on the debugger command thread (DbgCmdExec).
+
+        Note: x64dbg has no ``rerun`` command — sending it yields
+        ``Unknown command/expression: "rerun"``. ``init`` is the real command and
+        it requires the executable path as its first argument.
+
+        Args:
+            target_exe: Executable to load; defaults to the last start_session() target
+            cmdline: Command line arguments (defaults to the previous value)
+            current_dir: Working directory (defaults to the previous value)
+            timeout: Seconds to wait for the ``init`` sentinel and for the debuggee
+
+        Returns:
+            True if a debuggee is present again after the restart
+        """
+        if target_exe is None:
+            if self._last_target is None:
+                raise RuntimeError("No previous target; call start_session() first "
+                                   "or pass target_exe explicitly")
+            target_exe, prev_cmdline, prev_dir = self._last_target
+            cmdline = prev_cmdline if cmdline is None else cmdline
+            current_dir = prev_dir if current_dir is None else current_dir
+
+        target_exe = str(target_exe)
+        if not Path(target_exe).is_file():
+            raise FileNotFoundError(f"Target executable not found: {target_exe}")
+
+        if self.is_debugging():
+            self.cmd_sync("stop")
+            deadline = time.time() + 10
+            while self.is_debugging() and time.time() < deadline:
+                time.sleep(0.05)
+
+        args = [f'"{target_exe}"']
+        if cmdline:
+            args.append(f'"{cmdline}"')
+        if current_dir:
+            args.append(f'"{current_dir}"')
+
+        _, executed, _ = self.dbg_cmd_exec("init " + ", ".join(args), timeout)
+        if not executed:
+            return False
+        self._last_target = (target_exe, cmdline or "", current_dir or "")
+        return self.wait_until_debugging(timeout)
 
     def start_session_attach(self, pid: int) -> int:
         """

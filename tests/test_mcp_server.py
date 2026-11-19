@@ -978,6 +978,21 @@ class TestGetRegister:
         result = mcp_mod.get_register("rax")
         assert "0xDEADBEEF" in result
 
+    def test_get_reg_refuses_while_running(self, mock_client):
+        # A16: a running debuggee yields a frozen snapshot, so the tool must refuse
+        # instead of returning a value that merely looks live.
+        mock_client.is_running.return_value = True
+        result = mcp_mod.get_register("rax")
+        assert "running" in result
+        mock_client.get_reg.assert_not_called()
+
+    def test_get_reg_tolerates_non_bool_running(self, mock_client):
+        # The guard is `is True` on purpose: a MagicMock/None answer must not be
+        # mistaken for a running debuggee (regression introduced in local.13).
+        mock_client.is_running.return_value = None
+        mock_client.get_reg.return_value = 0xDEADBEEF
+        assert "0xDEADBEEF" in mcp_mod.get_register("rax")
+
 
 class TestSetRegister:
     def test_set_reg(self, mock_client):

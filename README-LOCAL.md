@@ -1,4 +1,4 @@
-# x64dbg-automate 本地 fork（local.9）
+# x64dbg-automate 本地 fork（local.14）
 
 不是重写，是把原先住在 `site-packages` 里的猴补丁**上抬成源码**，再用可编辑安装挂回运行时。
 来源：`github.com/dariushoule/x64dbg-automate-pyclient` @ `v0.9.2-ghost_fungus` + 本地分支 `local.3`
@@ -14,7 +14,7 @@
 ## 装了什么
 
 ```
-D:\od\x64dbg-automate-fork\      <- 本目录（git 分支 local.3）
+D:\toolkit\x64dbg-automate\app\      <- 本目录（git 分支 local.3）
   x64dbg_automate\
     __init__.py          + attach 失败时杀掉空跑进程（防孤儿）
     mcp_server.py        上游 + p1(run_python) + on 别名 + drain_first + 地址解析修复
@@ -23,6 +23,7 @@ D:\od\x64dbg-automate-fork\      <- 本目录（git 分支 local.3）
     commands_xauto.py    上游 + p1(execute_command 便捷方法)
     local_ext.py         10 个本地工具；xref 有 deep 模式；skip_call 支持 32 位
     mcp_server_local.py  薄入口：注册 local_ext 后 mcp.run()
+  # 上游层：restart_session（stop + init 走 DbgCmdExec，保留会话/断点库）
   ops\                   verify / xref_baseline / restore_stock / upgrade_upstream
 ```
 
@@ -35,7 +36,7 @@ MCP 工具 `local_patch_info` 会返回 patch 版本、包路径、本地工具�
 
 ```bash
 C:\Python314\python.exe -c "import x64dbg_automate as m; print(m.__file__)"
-# 必须是 D:\od\x64dbg-automate-fork\x64dbg_automate\__init__.py
+# 必须是 D:\toolkit\x64dbg-automate\app\x64dbg_automate\__init__.py
 ```
 
 ## ⚠️ 重装/升级时会被 exe 锁坑（实测两次）
@@ -86,9 +87,9 @@ C:\Python314\python.exe ops\xref_baseline.py --live        # 追加真机 fast/d
 ```
 
 `verify` 覆盖：安装健康（`__file__` 非 None、dist/pyproject/PATCH 三处版本一致、包路径不在
-site-packages，防 D13 那种"装一半"）、59 个工具、`toggle_breakpoint(on=)` 真的转成关闭、
+site-packages，防 D13 那种"装一半"）、65 个工具、`toggle_breakpoint(on=)` 真的转成关闭、
 `wait_for_event.drain_first` 默认 False、xref 三类 RIP 相对命中、`find_bytes` 不重复计重叠、
-`pause()` 无 debuggee 返回 False。
+`pause()` 无 debuggee 返回 False、`restart_session` 真的换掉 debuggee PID。
 
 `xref_baseline` 是**改 xref 实现前必须先跑绿**的基线：4 例现有快路径命中 + 2 例 0F 系
 （快路径不命中、deep 必须命中）；`--live` 会在真调试器上对比 fast/deep 的命中差异与耗时。

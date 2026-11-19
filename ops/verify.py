@@ -1,6 +1,6 @@
 """验证 fork 的三个修 + 本地工具在新结构下仍工作。
 
-cd D:\\od\\x64dbg-automate-fork && C:\\Python314\\python.exe <本文件>
+cd D:\\toolkit\\x64dbg-automate\\app && C:\\Python314\\python.exe <本文件>
 """
 import asyncio
 import logging

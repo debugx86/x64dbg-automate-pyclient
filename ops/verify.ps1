@@ -2,7 +2,7 @@
 # 用法: powershell -ExecutionPolicy Bypass -File ops\verify.ps1
 $ErrorActionPreference = "Continue"
 $py = "C:\Python314\python.exe"
-$root = "D:\od\x64dbg-automate-fork"
+$root = "D:\toolkit\x64dbg-automate\app"
 
 & $py "$root\ops\verify.py"
 $code = $LASTEXITCODE
