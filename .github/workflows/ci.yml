@@ -54,6 +54,8 @@ jobs:
       - name: Offline patch verification
         if: runner.os == 'Windows'
         shell: bash
+        env:
+          PYTHONIOENCODING: utf-8
         run: python ops/verify.py
 
       - name: Build wheel + sdist

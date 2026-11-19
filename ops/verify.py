@@ -7,6 +7,12 @@ import logging
 import os
 import sys
 
+# Windows runners default stdout to the legacy ANSI codepage (cp1252 on GitHub
+# Actions), which cannot encode the Chinese output below: the step died with
+# UnicodeEncodeError before a single check ran. Keep the output readable instead.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 logging.disable(logging.CRITICAL)   # 静音 mcp 的 INFO 请求日志，保持输出可 diff
 
