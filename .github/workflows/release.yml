@@ -35,7 +35,9 @@ jobs:
 
       - name: Smoke import
         run: |
-          python -m pip install --no-deps dist/*.whl
+          # Install the wheel with its runtime deps: the publish job is a fresh
+          # runner, so `--no-deps` fails on msgpack before the import is reached.
+          python -m pip install dist/*.whl
           python -c "import x64dbg_automate as m; print(m.__file__); print('compat:', m.COMPAT_VERSION)"
 
       - name: Publish GitHub release
