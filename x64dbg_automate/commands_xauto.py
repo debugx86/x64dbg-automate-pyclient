@@ -711,7 +711,8 @@ class XAutoCommandsMixin(XAutoClientBase):
         """
         return self._send_request(XAutoCommand.XAUTO_REQ_SCRIPT_LOAD, str(path))
 
-    def script_run(self, destline: int = 0) -> tuple[bool, str]:
+    def script_run(self, destline: int = 0, expect: str = "",
+                   settle: float = 4.0) -> tuple[bool, str]:
         """
         Runs the loaded script starting at destline (0-based).
 
@@ -720,6 +721,17 @@ class XAutoCommandsMixin(XAutoClientBase):
         dismissed here immediately. A script that stops on ``msg``/``msgy`` is
         auto-confirmed as a result - do not rely on a human answering it.
 
+        x64dbg aborts the *whole* script on the first failing line, and an
+        unknown command fails silently (no error text in the log). So ``ok=True``
+        only means "queued", not "ran to the end". Pass ``expect`` (typically the
+        text of a trailing ``log`` sentinel) to have this method poll the log and
+        report a real failure when the sentinel never shows up.
+
+        Args:
+            destline: Line to start at (0 = beginning)
+            expect: Sentinel text the script must have logged
+            settle: Seconds to wait for the sentinel
+
         Returns:
             A tuple of (ok, message)
         """
@@ -727,7 +739,32 @@ class XAutoCommandsMixin(XAutoClientBase):
         # The "script finished" box pops *after* this returns, so watch for a while
         # instead of checking once - otherwise the next RPC eats the modal block.
         self.dismiss_debugger_dialogs_soon(4.0)
-        return res
+        if not expect:
+            return res
+
+        deadline = time.time() + max(0.5, float(settle))
+        tail: list[str] = []
+        seen = False
+        while time.time() < deadline:
+            _, messages, *_ = self.get_log()
+            tail = [m for m in (messages or []) if "modal dialog" not in m]
+            if any(expect in m for m in tail):
+                seen = True
+                break
+            time.sleep(0.15)
+
+        ok, msg = res
+        if seen:
+            return ok, f"{msg}（哨兵 {expect!r} 已出现）"
+        # 失败时脚本往往一行日志都没产生（未知命令静默），把清场噪音也滤掉，
+        # 免得把 bpc 的"没有要删除的断点"当成脚本输出。
+        noise = ("没有可删除", "没有要删除", "断点已设置", "DLL已载入", "DLL 已载入",
+                 "正在调试", "进程已启动", "数据库文件", "正在读取命令行", "毫秒", "argv[")
+        useful = [m for m in tail if not any(n in m for n in noise) and m.strip()]
+        hint = " | ".join(useful[-3:])[-220:] if useful else "（脚本一行日志都没产生 —— 未知命令是静默失败）"
+        return False, (
+            f"{msg}；脚本没跑到哨兵 {expect!r} —— x64dbg 在第一条失败命令处整体中止，"
+            f"未知命令还不报错。日志尾：{hint}")
 
     def dbg_cmd_exec(self, command: str, timeout: int = 20) -> tuple[bool, bool, int]:
         """

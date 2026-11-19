@@ -29,7 +29,7 @@ import sys
 MEM_IMAGE = 0x1000000
 _MAX_SCAN = 64 * 1024 * 1024
 
-PATCH = "0.9.2+local.17"
+PATCH = "0.9.2+local.18"
 LOCAL_TOOLS: list[str] = []
 
 
@@ -875,11 +875,21 @@ def script_load(path: str) -> str:
         return f"Error: {e}"
 
 
-def script_run(destline: int = 0) -> str:
+def script_run(destline: int = 0, expect: str = "") -> str:
     """Run the loaded script starting at destline (0-based).
+
+    x64dbg stops the whole script at the first failing line, and an unknown
+    command fails without any error text - so a plain "OK" here only means
+    "queued". Put `log YOUR_SENTINEL` as the last line of the script and pass
+    the same text as `expect`: this call then polls the log and returns FAILED
+    with the log tail when the script never reached that line.
+
+    Args:
+        destline: Line to start at (0 = beginning)
+        expect: Sentinel text the script must have logged (empty = don't check)
     """
     try:
-        ok, msg = _client().script_run(max(0, int(destline)))
+        ok, msg = _client().script_run(max(0, int(destline)), expect=str(expect or ""))
         return f"{'OK' if ok else 'FAILED'}: {msg}"
     except Exception as e:
         return f"Error: {e}"
